@@ -96,8 +96,11 @@ class EwaldModelWrapper(nn.Module, BaseModelMixin):
         Defaults to ``14.3996`` (standard value for Å/e/eV unit system).
     slab_correction : bool, optional
         Whether to enable the two-dimensional slab correction. Defaults to
-        ``False``.
-
+        ``False``. When enabled, the input batch must provide ``data.pbc`` as
+        a boolean tensor with shape ``(B, 3)``. Rows with exactly one
+        ``False`` entry mark slab systems, for example ``[True, True, False]``
+        for a non-periodic z axis. Fully periodic rows are no-ops, so mixed
+        slab and three-dimensional periodic batches are supported.
 
     Attributes
     ----------
@@ -189,7 +192,10 @@ class EwaldModelWrapper(nn.Module, BaseModelMixin):
 
     def input_data(self) -> set[str]:
         """Return required input keys (override to drop ``atomic_numbers``)."""
-        return {"positions", "charges", "neighbor_matrix", "num_neighbors"}
+        keys = {"positions", "charges", "neighbor_matrix", "num_neighbors"}
+        if self.slab_correction:
+            keys.add("pbc")
+        return keys
 
     # ------------------------------------------------------------------
     # Cache management
@@ -256,6 +262,12 @@ class EwaldModelWrapper(nn.Module, BaseModelMixin):
         for key in self.input_data():
             value = getattr(data, key, None)
             if value is None:
+                if key == "pbc" and self.slab_correction:
+                    raise ValueError(
+                        "EwaldModelWrapper with slab_correction=True requires "
+                        "periodic boundary condition flags "
+                        "(data.pbc must be present)."
+                    )
                 raise KeyError(f"'{key}' required but not found in input data.")
             input_dict[key] = value
 
@@ -274,13 +286,13 @@ class EwaldModelWrapper(nn.Module, BaseModelMixin):
             )
 
         if self.slab_correction:
-            try:
-                input_dict["pbc"] = data.pbc  # (B, 3)
-            except AttributeError:
+            pbc = getattr(data, "pbc", None)
+            if pbc is None:
                 raise ValueError(
                     "EwaldModelWrapper with slab_correction=True requires "
                     "periodic boundary condition flags (data.pbc must be present)."
                 )
+            input_dict["pbc"] = pbc  # (B, 3)
 
         # neighbor_matrix and num_neighbors are already collected by the
         # input_data() loop above.  In a pipeline, the pipeline adapts them
@@ -399,29 +411,22 @@ class EwaldModelWrapper(nn.Module, BaseModelMixin):
                 self._null_shifts_shape = (N, K)
             neighbor_matrix_shifts = self._null_shifts
 
-        try:
-            result = ewald_summation(
-                positions=positions,
-                charges=charges,
-                cell=cell,
-                alpha=alpha,
-                k_vectors=k_vectors,
-                neighbor_matrix=neighbor_matrix,
-                neighbor_matrix_shifts=neighbor_matrix_shifts.contiguous(),
-                mask_value=fill_value,
-                batch_idx=batch_idx,
-                compute_forces=compute_forces,
-                compute_virial=compute_stresses,
-                hybrid_forces=self.hybrid_forces,
-                pbc=pbc,
-                slab_correction=self.slab_correction,
-            )
-        except ValueError as exc:
-            if compute_stresses and "not enough values to unpack" in str(exc):
-                raise RuntimeError(
-                    "stress was requested but the kernel did not return a virial"
-                ) from exc
-            raise
+        result = ewald_summation(
+            positions=positions,
+            charges=charges,
+            cell=cell,
+            alpha=alpha,
+            k_vectors=k_vectors,
+            neighbor_matrix=neighbor_matrix,
+            neighbor_matrix_shifts=neighbor_matrix_shifts.contiguous(),
+            mask_value=fill_value,
+            batch_idx=batch_idx,
+            compute_forces=compute_forces,
+            compute_virial=compute_stresses,
+            hybrid_forces=self.hybrid_forces,
+            pbc=pbc,
+            slab_correction=self.slab_correction,
+        )
 
         # Unpack results (energies always first; forces and virial follow in
         # the order they were requested).

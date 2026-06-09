@@ -203,6 +203,18 @@ class TestSlabAdaptInput:
         with pytest.raises(ValueError, match="data.pbc must be present"):
             model.adapt_input(batch)
 
+    def test_slab_correction_rejects_none_pbc(
+        self, model_factory: Callable[[bool], object]
+    ) -> None:
+        """Slab wrappers fail clearly when pbc exists but is None."""
+        model = model_factory(True)
+        batch = _make_charged_batch()
+        _add_empty_matrix_neighbors(batch)
+        batch.pbc = None
+
+        with pytest.raises(ValueError, match="data.pbc must be present"):
+            model.adapt_input(batch)
+
 
 class TestElectrostaticsSlabCorrection:
     """End-to-end slab-correction behavior for Ewald and PME wrappers."""
@@ -241,6 +253,7 @@ class TestElectrostaticsSlabCorrection:
         slab_on = _run_model(batch, method, slab_correction=True)
 
         assert not torch.allclose(slab_on["energy"], slab_off["energy"])
+        assert not torch.allclose(slab_on["stress"], slab_off["stress"])
 
     @pytest.mark.parametrize("method", ["ewald", "pme"])
     @pytest.mark.parametrize(
@@ -262,6 +275,8 @@ class TestElectrostaticsSlabCorrection:
 
         assert not torch.allclose(slab_on["energy"][0], slab_off["energy"][0])
         torch.testing.assert_close(slab_on["energy"][1], slab_off["energy"][1])
+        assert not torch.allclose(slab_on["stress"][0], slab_off["stress"][0])
+        torch.testing.assert_close(slab_on["stress"][1], slab_off["stress"][1])
 
         slab_atoms = batch.batch_idx == 0
         periodic_atoms = batch.batch_idx == 1
